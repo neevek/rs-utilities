@@ -73,14 +73,20 @@ impl LogHelper {
 pub struct Utils;
 
 impl Utils {
-    pub fn to_u32_be(array: &[u8; 4]) -> u32 {
+    pub fn to_u32_be(array: &[u8]) -> u32 {
+        if array.len() < 4 {
+            return 0;
+        }
         ((array[0] as u32) << 24)
             + ((array[1] as u32) << 16)
             + ((array[2] as u32) << 8)
             + ((array[3] as u32) << 0)
     }
 
-    pub fn to_u32_le(array: &[u8; 4]) -> u32 {
+    pub fn to_u32_le(array: &[u8]) -> u32 {
+        if array.len() < 4 {
+            return 0;
+        }
         ((array[0] as u32) << 0)
             + ((array[1] as u32) << 8)
             + ((array[2] as u32) << 16)
@@ -101,8 +107,12 @@ mod tests {
         log::warn!("test warn");
         log::error!("test error");
 
-        let n1 = Utils::to_u32_be(&[0, 0, 0, 1]);
-        let n2 = Utils::to_u32_le(&[0, 0, 0, 1]);
-        log::info!("n_be:{}, n_le:{}", n1, n2);
+        let mut n = [0u8; 1024];
+        n[3] = 1;
+
+        assert_eq!(Utils::to_u32_be(&[0, 0, 0, 1]), 1);
+        assert_eq!(Utils::to_u32_le(&[0, 0, 0, 1]), 16777216);
+        assert_eq!(Utils::to_u32_be(&n[..1]), 0);
+        assert_eq!(Utils::to_u32_be(&n[..4]), 1);
     }
 }
