@@ -1,0 +1,17 @@
+[package]
+name = "rs-utililies"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/neevek/rs-utililies"
+description = "Some utilities"
+keywords = ["utils", "utilities"]
+categories = [ "accessibility" ]
+
+[dependencies]
+log = "0.4"
+chrono = "0.4"
+pretty_env_logger = "0.4"
+
+#[target.aarch64-linux-android.dependencies]
+android_logger = "0.11"
