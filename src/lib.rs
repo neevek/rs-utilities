@@ -65,7 +65,7 @@ impl LogHelper {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_min_level(log_level)
-                .with_tag("rs-ffmpeg"),
+                .with_tag(tag),
         );
     }
 }
