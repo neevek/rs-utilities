@@ -75,7 +75,7 @@ pub struct Utils;
 impl Utils {
     pub fn to_u32_be(array: &[u8]) -> u32 {
         if array.len() < 4 {
-            return 0;
+            panic!("array length is less than 4");
         }
         ((array[0] as u32) << 24)
             + ((array[1] as u32) << 16)
@@ -85,12 +85,32 @@ impl Utils {
 
     pub fn to_u32_le(array: &[u8]) -> u32 {
         if array.len() < 4 {
-            return 0;
+            panic!("array length is less than 4");
         }
         ((array[0] as u32) << 0)
             + ((array[1] as u32) << 8)
             + ((array[2] as u32) << 16)
             + ((array[3] as u32) << 24)
+    }
+
+    pub fn as_u32_be(n: u32, array: &mut [u8]) {
+        if array.len() < 4 {
+            panic!("array length is less than 4");
+        }
+        array[0] = ((n >> 24) & 0xff) as u8;
+        array[1] = ((n >> 16) & 0xff) as u8;
+        array[2] = ((n >> 8) & 0xff) as u8;
+        array[3] = (n & 0xff) as u8;
+    }
+
+    pub fn as_u32_le(n: u32, array: &mut [u8]) {
+        if array.len() < 4 {
+            panic!("array length is less than 4");
+        }
+        array[0] = (n & 0xff) as u8;
+        array[1] = ((n >> 8) & 0xff) as u8;
+        array[2] = ((n >> 16) & 0xff) as u8;
+        array[3] = ((n >> 24) & 0xff) as u8;
     }
 }
 
@@ -107,12 +127,17 @@ mod tests {
         log::warn!("test warn");
         log::error!("test error");
 
-        let mut n = [0u8; 1024];
-        n[3] = 1;
+        let mut arr1 = [0u8; 1024];
+        arr1[3] = 1;
 
         assert_eq!(Utils::to_u32_be(&[0, 0, 0, 1]), 1);
         assert_eq!(Utils::to_u32_le(&[0, 0, 0, 1]), 16777216);
-        assert_eq!(Utils::to_u32_be(&n[..1]), 0);
-        assert_eq!(Utils::to_u32_be(&n[..4]), 1);
+        assert_eq!(Utils::to_u32_be(&arr1[..4]), 1);
+
+        let mut arr2 = [0u8; 1024];
+        let n = 0x12345678;
+        Utils::as_u32_be(n, &mut arr2);
+        assert_eq!(Utils::to_u32_be(&arr2[..4]), n);
+        assert_eq!(Utils::to_u32_le(&arr2[..4]), 0x78563412);
     }
 }
