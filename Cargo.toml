@@ -12,6 +12,13 @@ categories = [ "accessibility" ]
 log = "0.4"
 chrono = "0.4"
 pretty_env_logger = "0.4"
+trust-dns-resolver = { version = "0.22", features = ["dns-over-rustls"] }
+rustls = { version = "0.20", features = ["dangerous_configuration"] }
+webpki-roots = "0.22"
+anyhow = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.21", features = ["full"] }
 
 #[target.aarch64-linux-android.dependencies]
 android_logger = "0.11"

@@ -1,3 +1,4 @@
+pub mod dns;
 use std::sync::Once;
 
 extern crate pretty_env_logger;
