@@ -1,6 +1,6 @@
 [package]
 name = "rs-utilities"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/neevek/rs-utilities"
@@ -16,9 +16,10 @@ trust-dns-resolver = { version = "0.22", features = ["dns-over-rustls"] }
 rustls = { version = "0.20", features = ["dangerous_configuration"] }
 webpki-roots = "0.22"
 anyhow = "1.0"
+async-trait = "0.1"
+tokio = { version = "1.21", features = ["full"] }
 
 [dev-dependencies]
-tokio = { version = "1.21", features = ["full"] }
 
 [target.aarch64-linux-android.dependencies]
 android_logger = "0.11"

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use log::{debug, error, info};
 use rustls::{OwnedTrustAnchor, RootCertStore};
 use trust_dns_resolver::config::{
@@ -10,9 +11,7 @@ use trust_dns_resolver::config::{
     ResolverOpts, ServerOrderingStrategy,
 };
 use trust_dns_resolver::error::{ResolveError, ResolveErrorKind};
-use trust_dns_resolver::name_server::{
-    GenericConnection, GenericConnectionProvider, RuntimeProvider, TokioRuntime,
-};
+use trust_dns_resolver::name_server::{GenericConnection, GenericConnectionProvider, TokioRuntime};
 use trust_dns_resolver::system_conf::read_system_conf;
 use trust_dns_resolver::{AsyncResolver, TokioHandle};
 use webpki_roots;
@@ -23,47 +22,68 @@ pub enum DNSQueryOrdering {
     UserProvidedOrder,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum DoTProvider {
-    AliDNS,
-    DNSPod,
-    Google,
-    NotSpecified,
+pub type DynDNSResolver = Box<dyn DNSResolver + Send + Sync>;
+
+#[async_trait]
+pub trait DNSResolver {
+    async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>>;
+    async fn lookup_first(&self, domain: &str) -> Result<IpAddr>;
 }
 
-impl DoTProvider {
-    pub fn domain(&self) -> &'static str {
-        match *self {
-            DoTProvider::AliDNS => "dns.alidns.com",
-            DoTProvider::DNSPod => "dot.pub",
-            DoTProvider::Google => "dns.google",
-            DoTProvider::NotSpecified => "none",
-        }
+struct DefaultTokioResolver;
+
+#[async_trait]
+impl DNSResolver for DefaultTokioResolver {
+    async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
+        let ips = tokio::net::lookup_host(domain)
+            .await
+            .context(format!("failed to resolve domain: {}", domain))?
+            .map(|e| e.ip())
+            .collect();
+        debug!("resolved [{}] to {:?}", domain, ips);
+        Ok(ips)
+    }
+
+    async fn lookup_first(&self, domain: &str) -> Result<IpAddr> {
+        let ip = tokio::net::lookup_host(domain)
+            .await
+            .context(format!("failed to resolve domain: {}", domain))?
+            .next()
+            .map(|e| e.ip())
+            .context(format!(
+                "failed to obtain first resolved ip for domain: {}",
+                domain
+            ))?;
+        debug!("resolved [{}] to {:?}", domain, ip);
+        Ok(ip)
     }
 }
 
-impl From<&str> for DoTProvider {
-    fn from(s: &str) -> Self {
-        match s {
-            "alidns" => DoTProvider::AliDNS,
-            "dnspod" => DoTProvider::DNSPod,
-            "google" => DoTProvider::Google,
-            _ => DoTProvider::NotSpecified,
-        }
+#[async_trait]
+impl DNSResolver for AsyncResolver<GenericConnection, GenericConnectionProvider<TokioRuntime>> {
+    async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
+        let response = self.lookup_ip(domain).await.map_err(|e| {
+            error!("failed to resolve domain: {}, error: {}", domain, e);
+            e
+        })?;
+        let ips = response.iter().collect();
+        debug!("resolved [{}] to {:?}", domain, ips);
+        Ok(ips)
+    }
+
+    async fn lookup_first(&self, domain: &str) -> Result<IpAddr> {
+        let response = self.lookup_ip(domain).await?;
+        let ip = response
+            .iter()
+            .next()
+            .context(format!("failed to resolve domain: {}", domain));
+        debug!("resolved [{}] to {:?}", domain, ip);
+        ip
     }
 }
 
-pub struct DNSResolver<R: RuntimeProvider> {
-    resolver: AsyncResolver<GenericConnection, GenericConnectionProvider<R>>,
-}
-
-pub type TokioDNSResolver = DNSResolver<TokioRuntime>;
-
-pub async fn tokio_resolver(
-    dot_provider: DoTProvider,
-    dns_names: Vec<String>,
-) -> Option<TokioDNSResolver> {
-    tokio_resolver2(
+pub async fn resolver(dot_provider: &str, dns_names: Vec<String>) -> DynDNSResolver {
+    resolver2(
         dot_provider,
         dns_names,
         3,
@@ -72,67 +92,41 @@ pub async fn tokio_resolver(
     .await
 }
 
-pub async fn tokio_resolver2(
-    dot_provider: DoTProvider,
+pub async fn resolver2(
+    dot_provider: &str,
     dns_names: Vec<String>,
     num_conccurent_reqs: usize,
     ordering: DNSQueryOrdering,
-) -> Option<TokioDNSResolver> {
-    TokioDNSResolver::new(
+) -> DynDNSResolver {
+    if let Ok(resolver) = DNSResolverHelper::create_async_resolver(
         TokioHandle,
         dot_provider,
         dns_names,
         num_conccurent_reqs,
-        ordering,
+        ordering.clone(),
     )
     .await
+    {
+        resolver
+    } else {
+        info!("falled back to use system resolver!");
+        system_resolver(num_conccurent_reqs, ordering)
+    }
 }
 
-impl<R: RuntimeProvider> DNSResolver<R> {
-    pub async fn new(
-        handle: R::Handle,
-        dot_provider: DoTProvider,
-        dns_names: Vec<String>,
-        num_conccurent_reqs: usize,
-        ordering: DNSQueryOrdering,
-    ) -> Option<Self> {
-        Some(DNSResolver {
-            resolver: Self::create_async_resolver(
-                handle,
-                dot_provider,
-                dns_names,
-                num_conccurent_reqs,
-                ordering,
-            )
-            .await
-            .ok()?,
-        })
-    }
+pub fn system_resolver(num_conccurent_reqs: usize, ordering: DNSQueryOrdering) -> DynDNSResolver {
+    DNSResolverHelper::create_system_resolver(TokioHandle, num_conccurent_reqs, ordering)
+}
 
-    pub async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
-        let response = self.resolver.lookup_ip(domain).await?;
-        let ips = response.iter().collect();
-        debug!("resolved [{}] to {:?}", domain, ips);
-        Ok(ips)
-    }
-
-    pub async fn lookup_first(&self, domain: &str) -> Result<IpAddr> {
-        let response = self.resolver.lookup_ip(domain).await?;
-        let ip = response
-            .iter()
-            .next()
-            .context(format!("failed to resolve domain: {}", domain));
-        debug!("resolved [{}] to {:?}", domain, ip);
-        ip
-    }
-
+struct DNSResolverHelper;
+impl DNSResolverHelper {
     async fn create_async_resolver(
-        handle: R::Handle,
-        dot_provider: DoTProvider,
+        handle: TokioHandle,
+        dot_provider: &str,
         dns_names: Vec<String>,
         num_conccurent_reqs: usize,
         ordering: DNSQueryOrdering,
-    ) -> Result<AsyncResolver<GenericConnection, GenericConnectionProvider<R>>, ResolveError> {
+    ) -> Result<DynDNSResolver, ResolveError> {
         let mut resolver_cfg = None;
         let dot_ips: _ = Self::resolve_dot_server(
             &handle,
@@ -146,12 +140,8 @@ impl<R: RuntimeProvider> DNSResolver<R> {
         .unwrap_or_default();
 
         if !dot_ips.is_empty() {
-            let ns_group_cfg = NameServerConfigGroup::from_ips_tls(
-                &dot_ips,
-                853,
-                dot_provider.domain().to_string(),
-                true,
-            );
+            let ns_group_cfg =
+                NameServerConfigGroup::from_ips_tls(&dot_ips, 853, dot_provider.to_string(), true);
 
             let mut root_store = RootCertStore::empty();
             root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(
@@ -193,43 +183,52 @@ impl<R: RuntimeProvider> DNSResolver<R> {
         }
 
         if resolver_cfg.is_some() {
-            AsyncResolver::<GenericConnection, GenericConnectionProvider<R>>::new(
+            Ok(Box::new(AsyncResolver::<
+                GenericConnection,
+                GenericConnectionProvider<TokioRuntime>,
+            >::new(
                 resolver_cfg.unwrap(),
                 Self::create_resolver_conf(num_conccurent_reqs, &ordering),
                 handle,
-            )
+            )?))
         } else {
-            Self::create_simple_async_resolver(
+            Ok(Self::create_simple_async_resolver(
                 handle.clone(),
                 &vec![],
                 num_conccurent_reqs,
                 ordering.clone(),
-            )
+            ))
         }
     }
 
     async fn resolve_dot_server(
-        handle: &R::Handle,
-        dot_provider: &DoTProvider,
+        handle: &TokioHandle,
+        dot_provider: &str,
         dns_names: &[String],
         num_conccurent_reqs: usize,
         ordering: &DNSQueryOrdering,
     ) -> Result<Vec<IpAddr>, ResolveError> {
-        if *dot_provider != DoTProvider::NotSpecified {
+        if !dot_provider.is_empty() {
             // if DoT (DNS over TLS) is specified, a simple resolver is created to resolve the DoT domain first
             let tmp_resolver = Self::create_simple_async_resolver(
                 handle.clone(),
                 dns_names.as_ref(),
                 num_conccurent_reqs,
                 ordering.clone(),
-            )
-            .map_err(|e| ResolveErrorKind::Msg(e.to_string()))?;
+            );
 
             let dot_ips = tmp_resolver
-                .lookup_ip(dot_provider.domain())
-                .await?
-                .iter()
-                .collect::<Vec<IpAddr>>();
+                .lookup(dot_provider)
+                .await
+                .map_err(|e| {
+                    ResolveErrorKind::Msg(format!(
+                        "failed to resolve DoT domain: {}, error: {}",
+                        dot_provider, e
+                    ))
+                })
+                .into_iter()
+                .flatten()
+                .collect();
 
             Ok(dot_ips)
         } else {
@@ -238,11 +237,11 @@ impl<R: RuntimeProvider> DNSResolver<R> {
     }
 
     fn create_simple_async_resolver(
-        handle: R::Handle,
+        handle: TokioHandle,
         dns_names: &[String],
         num_conccurent_reqs: usize,
         ordering: DNSQueryOrdering,
-    ) -> Result<AsyncResolver<GenericConnection, GenericConnectionProvider<R>>, ResolveError> {
+    ) -> DynDNSResolver {
         let mut resolver_cfg = ResolverConfig::new();
         let valid_domain_count = Self::add_dns_servers(&mut resolver_cfg, dns_names);
         if valid_domain_count > 0 {
@@ -251,20 +250,32 @@ impl<R: RuntimeProvider> DNSResolver<R> {
                 Self::create_resolver_conf(num_conccurent_reqs, &ordering),
                 handle.clone(),
             ) {
-                return Ok(resolver);
+                return Box::new(resolver);
             }
         }
 
         info!("will use system name servers");
-        let (resolver_cfg, resolver_opt) =
-            Self::create_resolver_system_conf(num_conccurent_reqs, &ordering)
-                .map_err(|e| ResolveErrorKind::Msg(e.to_string()))?;
+        Self::create_system_resolver(handle, num_conccurent_reqs, ordering)
+    }
 
-        AsyncResolver::<GenericConnection, GenericConnectionProvider<R>>::new(
-            resolver_cfg,
-            resolver_opt,
-            handle,
-        )
+    fn create_system_resolver(
+        handle: TokioHandle,
+        num_conccurent_reqs: usize,
+        ordering: DNSQueryOrdering,
+    ) -> DynDNSResolver {
+        if let Ok((resolver_cfg, resolver_opt)) =
+            Self::create_resolver_system_conf(num_conccurent_reqs, &ordering)
+        {
+            if let Ok(res) = AsyncResolver::<
+                GenericConnection,
+                GenericConnectionProvider<TokioRuntime>,
+            >::new(resolver_cfg, resolver_opt, handle)
+            {
+                return Box::new(res);
+            }
+        }
+
+        Box::new(DefaultTokioResolver)
     }
 
     fn add_dns_servers(resolver_cfg: &mut ResolverConfig, dns_names: &[String]) -> usize {
@@ -329,19 +340,17 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let resolver = tokio_resolver2(
-                    DoTProvider::AliDNS,
-                    //DoTProvider::NotSpecified,
-                    vec!["223.5.5.5".to_string()],
-                    //vec![],
+                let resolver = resolver2(
+                    "dns.alidns.com",
+                    //"",
+                    //vec!["223.5.5.5".to_string()],
+                    vec![],
                     2,
                     DNSQueryOrdering::QueryStatistics,
                 )
-                .await
-                .unwrap();
+                .await;
 
-                let result = resolver.lookup("google.com").await.unwrap();
-                info!("resolve result: {:?}", result);
+                resolver.lookup("google.com").await.unwrap();
             });
     }
 }
