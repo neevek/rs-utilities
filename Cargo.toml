@@ -1,6 +1,6 @@
 [package]
 name = "rs-utilities"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/neevek/rs-utilities"
@@ -20,5 +20,5 @@ anyhow = "1.0"
 [dev-dependencies]
 tokio = { version = "1.21", features = ["full"] }
 
-#[target.aarch64-linux-android.dependencies]
+[target.aarch64-linux-android.dependencies]
 android_logger = "0.11"
