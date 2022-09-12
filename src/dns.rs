@@ -30,11 +30,27 @@ pub trait DNSResolver {
     async fn lookup_first(&self, domain: &str) -> Result<IpAddr>;
 }
 
-struct DefaultTokioResolver;
+struct SimpleTokioResolver;
+
+fn ensure_port(domain: &str) -> Option<String> {
+    if domain.rfind(':').is_none() {
+        // tokio::net::lookup_host() accepts domain:port pair, but we only want IP,
+        // a random port is used here
+        Some(domain.to_owned() + ":80")
+    } else {
+        None
+    }
+}
 
 #[async_trait]
-impl DNSResolver for DefaultTokioResolver {
+impl DNSResolver for SimpleTokioResolver {
     async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
+        let domain_with_port = ensure_port(domain);
+        let domain = if domain_with_port.is_some() {
+            domain_with_port.as_ref().unwrap().as_str()
+        } else {
+            domain
+        };
         let ips = tokio::net::lookup_host(domain)
             .await
             .context(format!("failed to resolve domain: {}", domain))?
@@ -45,6 +61,12 @@ impl DNSResolver for DefaultTokioResolver {
     }
 
     async fn lookup_first(&self, domain: &str) -> Result<IpAddr> {
+        let domain_with_port = ensure_port(domain);
+        let domain = if domain_with_port.is_some() {
+            domain_with_port.as_ref().unwrap().as_str()
+        } else {
+            domain
+        };
         let ip = tokio::net::lookup_host(domain)
             .await
             .context(format!("failed to resolve domain: {}", domain))?
@@ -109,7 +131,7 @@ pub async fn resolver2(
     {
         resolver
     } else {
-        info!("falled back to use system resolver!");
+        info!("fall back to use system resolver!");
         system_resolver(num_conccurent_reqs, ordering)
     }
 }
@@ -209,6 +231,7 @@ impl DNSResolverHelper {
         ordering: &DNSQueryOrdering,
     ) -> Result<Vec<IpAddr>, ResolveError> {
         if !dot_provider.is_empty() {
+            info!("resovling DoT server: {}", dot_provider);
             // if DoT (DNS over TLS) is specified, a simple resolver is created to resolve the DoT domain first
             let tmp_resolver = Self::create_simple_async_resolver(
                 handle.clone(),
@@ -221,10 +244,12 @@ impl DNSResolverHelper {
                 .lookup(dot_provider)
                 .await
                 .map_err(|e| {
-                    ResolveErrorKind::Msg(format!(
+                    let msg = format!(
                         "failed to resolve DoT domain: {}, error: {}",
                         dot_provider, e
-                    ))
+                    );
+                    error!("{}", msg);
+                    ResolveErrorKind::Msg(msg)
                 })
                 .into_iter()
                 .flatten()
@@ -232,6 +257,7 @@ impl DNSResolverHelper {
 
             Ok(dot_ips)
         } else {
+            info!("no DoT server is specified");
             Ok(vec![])
         }
     }
@@ -254,7 +280,6 @@ impl DNSResolverHelper {
             }
         }
 
-        info!("will use system name servers");
         Self::create_system_resolver(handle, num_conccurent_reqs, ordering)
     }
 
@@ -271,11 +296,13 @@ impl DNSResolverHelper {
                 GenericConnectionProvider<TokioRuntime>,
             >::new(resolver_cfg, resolver_opt, handle)
             {
+                info!("use system resolver with /etc/resolv.conf");
                 return Box::new(res);
             }
         }
 
-        Box::new(DefaultTokioResolver)
+        info!("use simple tokio resolver");
+        Box::new(SimpleTokioResolver)
     }
 
     fn add_dns_servers(resolver_cfg: &mut ResolverConfig, dns_names: &[String]) -> usize {
