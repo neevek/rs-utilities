@@ -1,12 +1,12 @@
 [package]
 name = "rs-utilities"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/neevek/rs-utilities"
 description = "Some utilities"
 keywords = ["utils", "utilities"]
-categories = [ "accessibility" ]
+categories = ["accessibility"]
 
 [dependencies]
 log = "0.4"

@@ -22,10 +22,43 @@ pub enum DNSQueryOrdering {
     UserProvidedOrder,
 }
 
-pub type DynDNSResolver = Box<dyn DNSResolver + Send + Sync>;
+#[derive(PartialEq, Clone)]
+pub enum DNSResolverType {
+    DoT,
+    UserProvided,
+    System,
+}
+
+pub struct DNSResolver {
+    resolver: DynAsyncDNSResolver,
+    resolver_type: DNSResolverType,
+}
+
+impl DNSResolver {
+    fn new(resolver: DynAsyncDNSResolver, resolver_type: DNSResolverType) -> Self {
+        Self {
+            resolver,
+            resolver_type,
+        }
+    }
+
+    pub async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
+        self.resolver.lookup(domain).await
+    }
+
+    pub async fn lookup_first(&self, domain: &str) -> Result<IpAddr> {
+        self.resolver.lookup_first(domain).await
+    }
+
+    pub fn resolver_type(&self) -> DNSResolverType {
+        self.resolver_type.clone()
+    }
+}
+
+type DynAsyncDNSResolver = Box<dyn AsyncDNSResolver + Send + Sync>;
 
 #[async_trait]
-pub trait DNSResolver {
+trait AsyncDNSResolver {
     async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>>;
     async fn lookup_first(&self, domain: &str) -> Result<IpAddr>;
 }
@@ -43,7 +76,7 @@ fn ensure_port(domain: &str) -> Option<String> {
 }
 
 #[async_trait]
-impl DNSResolver for SimpleTokioResolver {
+impl AsyncDNSResolver for SimpleTokioResolver {
     async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
         let domain_with_port = ensure_port(domain);
         let domain = if domain_with_port.is_some() {
@@ -82,7 +115,9 @@ impl DNSResolver for SimpleTokioResolver {
 }
 
 #[async_trait]
-impl DNSResolver for AsyncResolver<GenericConnection, GenericConnectionProvider<TokioRuntime>> {
+impl AsyncDNSResolver
+    for AsyncResolver<GenericConnection, GenericConnectionProvider<TokioRuntime>>
+{
     async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
         let response = self.lookup_ip(domain).await.map_err(|e| {
             error!("failed to resolve domain: {}, error: {}", domain, e);
@@ -104,7 +139,7 @@ impl DNSResolver for AsyncResolver<GenericConnection, GenericConnectionProvider<
     }
 }
 
-pub async fn resolver(dot_provider: &str, dns_names: Vec<String>) -> DynDNSResolver {
+pub async fn resolver(dot_provider: &str, dns_names: Vec<String>) -> DNSResolver {
     resolver2(
         dot_provider,
         dns_names,
@@ -119,7 +154,7 @@ pub async fn resolver2(
     dns_names: Vec<String>,
     num_conccurent_reqs: usize,
     ordering: DNSQueryOrdering,
-) -> DynDNSResolver {
+) -> DNSResolver {
     if let Ok(resolver) = DNSResolverHelper::create_async_resolver(
         TokioHandle,
         dot_provider,
@@ -136,8 +171,11 @@ pub async fn resolver2(
     }
 }
 
-pub fn system_resolver(num_conccurent_reqs: usize, ordering: DNSQueryOrdering) -> DynDNSResolver {
-    DNSResolverHelper::create_system_resolver(TokioHandle, num_conccurent_reqs, ordering)
+pub fn system_resolver(num_conccurent_reqs: usize, ordering: DNSQueryOrdering) -> DNSResolver {
+    DNSResolver::new(
+        DNSResolverHelper::create_system_resolver(TokioHandle, num_conccurent_reqs, ordering),
+        DNSResolverType::System,
+    )
 }
 
 struct DNSResolverHelper;
@@ -148,7 +186,7 @@ impl DNSResolverHelper {
         dns_names: Vec<String>,
         num_conccurent_reqs: usize,
         ordering: DNSQueryOrdering,
-    ) -> Result<DynDNSResolver, ResolveError> {
+    ) -> Result<DNSResolver, ResolveError> {
         let mut resolver_cfg = None;
         let dot_ips: _ = Self::resolve_dot_server(
             &handle,
@@ -161,6 +199,7 @@ impl DNSResolverHelper {
         .map_err(|e| error!("resolving DoT server failed: {}", e))
         .unwrap_or_default();
 
+        let mut using_dot = false;
         if !dot_ips.is_empty() {
             let ns_group_cfg =
                 NameServerConfigGroup::from_ips_tls(&dot_ips, 853, dot_provider.to_string(), true);
@@ -187,6 +226,7 @@ impl DNSResolverHelper {
             let mut dot_resolver_cfg = ResolverConfig::from_parts(None, vec![], ns_group_cfg);
             dot_resolver_cfg.set_tls_client_config(Arc::new(client_config));
             resolver_cfg = Some(dot_resolver_cfg);
+            using_dot = true;
 
             info!("will use DoT server: {:?} -> {:?}", dot_provider, dot_ips);
         }
@@ -204,23 +244,33 @@ impl DNSResolverHelper {
             }
         }
 
+        let async_dns_resolver: DynAsyncDNSResolver;
+        let resolver_type;
         if resolver_cfg.is_some() {
-            Ok(Box::new(AsyncResolver::<
+            async_dns_resolver = Box::new(AsyncResolver::<
                 GenericConnection,
                 GenericConnectionProvider<TokioRuntime>,
             >::new(
                 resolver_cfg.unwrap(),
                 Self::create_resolver_conf(num_conccurent_reqs, &ordering),
                 handle,
-            )?))
+            )?);
+            resolver_type = if using_dot {
+                DNSResolverType::DoT
+            } else {
+                DNSResolverType::UserProvided
+            };
         } else {
-            Ok(Self::create_simple_async_resolver(
+            async_dns_resolver = Self::create_simple_async_resolver(
                 handle.clone(),
                 &vec![],
                 num_conccurent_reqs,
                 ordering.clone(),
-            ))
+            );
+            resolver_type = DNSResolverType::System;
         }
+
+        Ok(DNSResolver::new(async_dns_resolver, resolver_type))
     }
 
     async fn resolve_dot_server(
@@ -267,7 +317,7 @@ impl DNSResolverHelper {
         dns_names: &[String],
         num_conccurent_reqs: usize,
         ordering: DNSQueryOrdering,
-    ) -> DynDNSResolver {
+    ) -> DynAsyncDNSResolver {
         let mut resolver_cfg = ResolverConfig::new();
         let valid_domain_count = Self::add_dns_servers(&mut resolver_cfg, dns_names);
         if valid_domain_count > 0 {
@@ -287,7 +337,7 @@ impl DNSResolverHelper {
         handle: TokioHandle,
         num_conccurent_reqs: usize,
         ordering: DNSQueryOrdering,
-    ) -> DynDNSResolver {
+    ) -> DynAsyncDNSResolver {
         if let Ok((resolver_cfg, resolver_opt)) =
             Self::create_resolver_system_conf(num_conccurent_reqs, &ordering)
         {
