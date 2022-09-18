@@ -1,3 +1,6 @@
+#[macro_use]
+pub mod macros;
+
 pub mod dns;
 use std::sync::Once;
 

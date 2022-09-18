@@ -29,6 +29,16 @@ pub enum DNSResolverType {
     System,
 }
 
+impl ToString for DNSResolverType {
+    fn to_string(&self) -> String {
+        match &self {
+            Self::DoT => "DoT".to_string(),
+            Self::UserProvided => "UserPrivided".to_string(),
+            Self::System => "System".to_string(),
+        }
+    }
+}
+
 pub struct DNSResolver {
     resolver: DynAsyncDNSResolver,
     resolver_type: DNSResolverType,
