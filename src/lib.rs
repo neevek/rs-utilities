@@ -118,7 +118,44 @@ impl Utils {
     }
 }
 
+pub struct ByteBuffer<const N: usize> {
+    arr: [u8; N],
+    used: usize,
+}
+
+impl<const N: usize> ByteBuffer<N> {
+    pub fn new() -> Self {
+        ByteBuffer {
+            arr: [0u8; N],
+            used: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.arr[..self.used]
+    }
+
+    /// return false if remaining buffer is not big enough to store the data
+    pub fn append(&mut self, data: &[u8]) -> bool {
+        if data.len() + self.used > N {
+            return false;
+        }
+        self.arr[..self.used].copy_from_slice(data);
+        self.used += data.len();
+        true
+    }
+
+    pub const fn remaining(&self) -> usize {
+        N - self.used
+    }
+
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+}
+
 #[cfg(test)]
+
 mod tests {
     use crate::{LogHelper, Utils};
 
