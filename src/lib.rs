@@ -116,6 +116,11 @@ impl Utils {
         array[2] = ((n >> 16) & 0xff) as u8;
         array[3] = ((n >> 24) & 0xff) as u8;
     }
+
+    pub fn copy_slice(dst: &mut [u8], src: &[u8]) {
+        let l = std::cmp::min(dst.len(), src.len());
+        dst[..l].copy_from_slice(&src[..l]);
+    }
 }
 
 pub struct ByteBuffer<const N: usize> {
@@ -140,13 +145,21 @@ impl<const N: usize> ByteBuffer<N> {
         if data.len() + self.used > N {
             return false;
         }
-        self.arr[..self.used].copy_from_slice(data);
+        Utils::copy_slice(&mut self.arr[self.used..], data);
         self.used += data.len();
         true
     }
 
+    pub fn clear(&mut self) {
+        self.used = 0;
+    }
+
     pub const fn remaining(&self) -> usize {
         N - self.used
+    }
+
+    pub const fn len(&self) -> usize {
+        self.used
     }
 
     pub const fn capacity(&self) -> usize {
