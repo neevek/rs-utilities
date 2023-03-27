@@ -117,9 +117,10 @@ impl Utils {
         array[3] = ((n >> 24) & 0xff) as u8;
     }
 
-    pub fn copy_slice(dst: &mut [u8], src: &[u8]) {
-        let l = std::cmp::min(dst.len(), src.len());
-        dst[..l].copy_from_slice(&src[..l]);
+    pub fn copy_slice(dst: &mut [u8], src: &[u8]) -> usize {
+        let min_len = std::cmp::min(dst.len(), src.len());
+        dst[..min_len].copy_from_slice(&src[..min_len]);
+        min_len
     }
 }
 
