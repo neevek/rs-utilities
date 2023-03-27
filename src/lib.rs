@@ -151,6 +151,15 @@ impl<const N: usize> ByteBuffer<N> {
         true
     }
 
+    pub fn append_byte(&mut self, byte: u8) -> bool {
+        if 1 + self.used > N {
+            return false;
+        }
+        self.arr[self.used] = byte;
+        self.used += 1;
+        true
+    }
+
     pub fn clear(&mut self) {
         self.used = 0;
     }
