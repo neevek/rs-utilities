@@ -1,6 +1,6 @@
 [package]
 name = "rs-utilities"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/neevek/rs-utilities"
@@ -18,8 +18,6 @@ webpki-roots = "0.22"
 anyhow = "1.0"
 async-trait = "0.1"
 tokio = { version = "1.21", features = ["full"] }
-
-[dev-dependencies]
 
 [target.aarch64-linux-android.dependencies]
 android_logger = "0.11"
