@@ -1,6 +1,6 @@
 [package]
 name = "rs-utilities"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/neevek/rs-utilities"
@@ -11,16 +11,16 @@ categories = ["accessibility"]
 [dependencies]
 log = "0.4"
 chrono = "0.4"
-pretty_env_logger = "0.4"
-trust-dns-resolver = { version = "0.22", features = ["dns-over-rustls"] }
-rustls = { version = "0.20", features = ["dangerous_configuration"] }
-webpki-roots = "0.22"
+pretty_env_logger = "0.5"
+trust-dns-resolver = { version = "0.23", features = ["dns-over-rustls"] }
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+webpki-roots = "0.25"
 anyhow = "1.0"
 async-trait = "0.1"
 tokio = { version = "1.21", features = ["full"] }
 
 [target.aarch64-linux-android.dependencies]
-android_logger = "0.11"
+android_logger = "0.13"
 
 [target.armv7-linux-androideabi.dependencies]
-android_logger = "0.11"
+android_logger = "0.13"

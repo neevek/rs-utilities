@@ -1,6 +1,5 @@
 #[macro_use]
 pub mod macros;
-
 pub mod dns;
 use std::sync::Once;
 
@@ -53,20 +52,19 @@ impl LogHelper {
     }
 
     #[cfg(target_os = "android")]
-    fn do_init_logger(tag: &str, log_level_str: &str) {
-        let log_level;
-        match log_level_str.as_ref() {
-            "D" => log_level = log::Level::Debug,
-            "I" => log_level = log::Level::Info,
-            "W" => log_level = log::Level::Warn,
-            "E" => log_level = log::Level::Error,
-            _ => log_level = log::Level::Trace,
-        }
+    fn do_init_logger(tag: &str, log_filter: &'static str) {
+        let log_filter = if !log_filter.is_empty() {
+            log_filter.to_string()
+        } else {
+            std::env::var("RUST_LOG").unwrap_or("".to_string())
+        };
 
         android_logger::init_once(
-            android_logger::Config::default()
-                .with_min_level(log_level)
-                .with_tag(tag),
+            android_logger::Config::default().with_tag(tag).with_filter(
+                android_logger::FilterBuilder::new()
+                    .parse(log_filter.as_str())
+                    .build(),
+            ),
         );
     }
 }
