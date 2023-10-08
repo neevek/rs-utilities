@@ -25,12 +25,12 @@ macro_rules! colored_log {
 
 pub struct LogHelper;
 impl LogHelper {
-    pub fn init_logger(tag: &'static str, log_filter: &'static str) {
+    pub fn init_logger(tag: &'static str, log_filter: &str) {
         INIT_LOGGER_ONCE.call_once(|| LogHelper::do_init_logger(tag, log_filter));
     }
 
     #[cfg(not(target_os = "android"))]
-    fn do_init_logger(tag: &'static str, log_filter: &'static str) {
+    fn do_init_logger(tag: &'static str, log_filter: &str) {
         use std::io::Write;
 
         let log_filter = if !log_filter.is_empty() {
