@@ -11,14 +11,13 @@ static INIT_LOGGER_ONCE: Once = Once::new();
 #[cfg(not(target_os = "android"))]
 macro_rules! colored_log {
     ($buf:ident, $record:ident, $tag:ident, $term_color:literal, $level:literal) => {{
-        let filename = $record.file().unwrap_or("unknown");
-        let filename = &filename[filename.rfind('/').map(|pos| pos + 1).unwrap_or(0)..];
+        let module = $record.target();
         writeln!(
             $buf,
             concat!($term_color, "{} [{}] [{}:{}] [", $level, "] {}\x1B[0m"),
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S.%3f"),
             $tag,
-            filename,
+            module,
             $record.line().unwrap_or(0),
             $record.args()
         )
@@ -27,21 +26,19 @@ macro_rules! colored_log {
 
 pub struct LogHelper;
 impl LogHelper {
-    pub fn init_logger(tag: &'static str, log_level: &str) {
-        INIT_LOGGER_ONCE.call_once(|| LogHelper::do_init_logger(tag, log_level));
+    pub fn init_logger(tag: &'static str, log_filter: &'static str) {
+        INIT_LOGGER_ONCE.call_once(|| LogHelper::do_init_logger(tag, log_filter));
     }
 
     #[cfg(not(target_os = "android"))]
-    fn do_init_logger(tag: &'static str, log_level_str: &str) {
+    fn do_init_logger(tag: &'static str, log_filter: &'static str) {
         use std::io::Write;
-        let log_level_filter;
-        match log_level_str.as_ref() {
-            "D" => log_level_filter = log::LevelFilter::Debug,
-            "I" => log_level_filter = log::LevelFilter::Info,
-            "W" => log_level_filter = log::LevelFilter::Warn,
-            "E" => log_level_filter = log::LevelFilter::Error,
-            _ => log_level_filter = log::LevelFilter::Trace,
-        }
+
+        let log_filter = if !log_filter.is_empty() {
+            log_filter.to_string()
+        } else {
+            std::env::var("RUST_LOG").unwrap_or("".to_string())
+        };
 
         pretty_env_logger::formatted_timed_builder()
             .format(move |buf, record| match record.level() {
@@ -51,7 +48,7 @@ impl LogHelper {
                 log::Level::Warn => colored_log!(buf, record, tag, "\x1B[93m", "W"),
                 log::Level::Error => colored_log!(buf, record, tag, "\x1B[31m", "E"),
             })
-            .filter(None, log_level_filter)
+            .parse_filters(log_filter.as_str())
             .init();
     }
 
@@ -184,7 +181,7 @@ mod tests {
 
     #[test]
     fn it_works() {
-        LogHelper::init_logger("Test", "T");
+        LogHelper::init_logger("haha", "rs_utilities=trace");
         log::trace!("test trace");
         log::debug!("test debug");
         log::info!("test info");
