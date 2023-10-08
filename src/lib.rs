@@ -52,7 +52,7 @@ impl LogHelper {
     }
 
     #[cfg(target_os = "android")]
-    fn do_init_logger(tag: &str, log_filter: &'static str) {
+    fn do_init_logger(tag: &str, log_filter: & str) {
         let log_filter = if !log_filter.is_empty() {
             log_filter.to_string()
         } else {
