@@ -52,7 +52,7 @@ impl LogHelper {
     }
 
     #[cfg(target_os = "android")]
-    fn do_init_logger(tag: &str, log_filter: & str) {
+    fn do_init_logger(tag: &str, log_filter: &str) {
         let log_filter = if !log_filter.is_empty() {
             log_filter.to_string()
         } else {
@@ -60,11 +60,14 @@ impl LogHelper {
         };
 
         android_logger::init_once(
-            android_logger::Config::default().with_tag(tag).with_filter(
-                android_logger::FilterBuilder::new()
-                    .parse(log_filter.as_str())
-                    .build(),
-            ),
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Trace)
+                .with_tag(tag)
+                .with_filter(
+                    android_logger::FilterBuilder::new()
+                        .parse(log_filter.as_str())
+                        .build(),
+                ),
         );
     }
 }
