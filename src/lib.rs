@@ -33,10 +33,10 @@ impl LogHelper {
     fn do_init_logger(tag: &'static str, log_filter: &str) {
         use std::io::Write;
 
-        let log_filter = if !log_filter.is_empty() {
-            log_filter.to_string()
+        let log_filter = if let Ok(log_filter) = std::env::var("RUST_LOG") {
+            log_filter
         } else {
-            std::env::var("RUST_LOG").unwrap_or("".to_string())
+            log_filter.to_string()
         };
 
         pretty_env_logger::formatted_timed_builder()
@@ -53,10 +53,10 @@ impl LogHelper {
 
     #[cfg(target_os = "android")]
     fn do_init_logger(tag: &str, log_filter: &str) {
-        let log_filter = if !log_filter.is_empty() {
-            log_filter.to_string()
+        let log_filter = if let Ok(log_filter) = std::env::var("RUST_LOG") {
+            log_filter
         } else {
-            std::env::var("RUST_LOG").unwrap_or("".to_string())
+            log_filter.to_string()
         };
 
         android_logger::init_once(
