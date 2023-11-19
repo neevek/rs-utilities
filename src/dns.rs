@@ -29,6 +29,34 @@ pub enum DNSResolverType {
     System,
 }
 
+#[derive(Clone)]
+pub enum DNSResolverLookupIpStrategy {
+    Ipv4Only,
+    Ipv6Only,
+    Ipv4AndIpv6,
+    Ipv6thenIpv4,
+    Ipv4thenIpv6,
+}
+
+impl DNSResolverLookupIpStrategy {
+    fn mapped_type(&self) -> LookupIpStrategy {
+        match self {
+            DNSResolverLookupIpStrategy::Ipv4Only => LookupIpStrategy::Ipv4Only,
+            DNSResolverLookupIpStrategy::Ipv6Only => LookupIpStrategy::Ipv6Only,
+            DNSResolverLookupIpStrategy::Ipv4AndIpv6 => LookupIpStrategy::Ipv4AndIpv6,
+            DNSResolverLookupIpStrategy::Ipv6thenIpv4 => LookupIpStrategy::Ipv6thenIpv4,
+            DNSResolverLookupIpStrategy::Ipv4thenIpv6 => LookupIpStrategy::Ipv4thenIpv6,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DNSResolverConfig {
+    strategy: DNSResolverLookupIpStrategy,
+    ordering: DNSQueryOrdering,
+    num_conccurent_reqs: usize,
+}
+
 impl ToString for DNSResolverType {
     fn to_string(&self) -> String {
         match &self {
@@ -148,39 +176,32 @@ impl<R: ConnectionProvider> AsyncDNSResolver for AsyncResolver<R> {
 }
 
 pub async fn resolver(dot_provider: &str, dns_names: Vec<String>) -> DNSResolver {
-    resolver2(
-        dot_provider,
-        dns_names,
-        3,
-        DNSQueryOrdering::QueryStatistics,
-    )
-    .await
+    let default_config = DNSResolverConfig {
+        strategy: DNSResolverLookupIpStrategy::Ipv4thenIpv6,
+        num_conccurent_reqs: 3,
+        ordering: DNSQueryOrdering::QueryStatistics,
+    };
+    resolver2(dot_provider, dns_names, default_config).await
 }
 
 pub async fn resolver2(
     dot_provider: &str,
     dns_names: Vec<String>,
-    num_conccurent_reqs: usize,
-    ordering: DNSQueryOrdering,
+    config: DNSResolverConfig,
 ) -> DNSResolver {
-    if let Ok(resolver) = DNSResolverHelper::create_async_resolver(
-        dot_provider,
-        dns_names,
-        num_conccurent_reqs,
-        ordering.clone(),
-    )
-    .await
+    if let Ok(resolver) =
+        DNSResolverHelper::create_async_resolver(dot_provider, dns_names, config.clone()).await
     {
         resolver
     } else {
         info!("fall back to use system resolver!");
-        system_resolver(num_conccurent_reqs, ordering)
+        system_resolver(config)
     }
 }
 
-pub fn system_resolver(num_conccurent_reqs: usize, ordering: DNSQueryOrdering) -> DNSResolver {
+pub fn system_resolver(config: DNSResolverConfig) -> DNSResolver {
     DNSResolver::new(
-        DNSResolverHelper::create_system_resolver(num_conccurent_reqs, ordering),
+        DNSResolverHelper::create_system_resolver(config),
         DNSResolverType::System,
     )
 }
@@ -190,15 +211,13 @@ impl DNSResolverHelper {
     async fn create_async_resolver(
         dot_provider: &str,
         dns_names: Vec<String>,
-        num_conccurent_reqs: usize,
-        ordering: DNSQueryOrdering,
+        config: DNSResolverConfig,
     ) -> Result<DNSResolver, ResolveError> {
         let mut resolver_cfg = None;
-        let dot_ips: _ =
-            Self::resolve_dot_server(&dot_provider, &dns_names, num_conccurent_reqs, &ordering)
-                .await
-                .map_err(|e| error!("resolving DoT server failed: {}", e))
-                .unwrap_or_default();
+        let dot_ips: _ = Self::resolve_dot_server(&dot_provider, &dns_names, config.clone())
+            .await
+            .map_err(|e| error!("resolving DoT server failed: {}", e))
+            .unwrap_or_default();
 
         let mut using_dot = false;
         if !dot_ips.is_empty() {
@@ -248,7 +267,7 @@ impl DNSResolverHelper {
         if resolver_cfg.is_some() {
             async_dns_resolver = Box::new(AsyncResolver::tokio(
                 resolver_cfg.unwrap(),
-                Self::create_resolver_conf(num_conccurent_reqs, &ordering),
+                Self::create_resolver_conf(config),
             ));
             resolver_type = if using_dot {
                 DNSResolverType::DoT
@@ -256,8 +275,7 @@ impl DNSResolverHelper {
                 DNSResolverType::UserProvided
             };
         } else {
-            async_dns_resolver =
-                Self::create_simple_async_resolver(&vec![], num_conccurent_reqs, ordering.clone());
+            async_dns_resolver = Self::create_simple_async_resolver(&vec![], config);
             resolver_type = DNSResolverType::System;
         }
 
@@ -267,17 +285,12 @@ impl DNSResolverHelper {
     async fn resolve_dot_server(
         dot_provider: &str,
         dns_names: &[String],
-        num_conccurent_reqs: usize,
-        ordering: &DNSQueryOrdering,
+        config: DNSResolverConfig,
     ) -> Result<Vec<IpAddr>, ResolveError> {
         if !dot_provider.is_empty() {
             info!("resovling DoT server: {}", dot_provider);
             // if DoT (DNS over TLS) is specified, a simple resolver is created to resolve the DoT domain first
-            let tmp_resolver = Self::create_simple_async_resolver(
-                dns_names.as_ref(),
-                num_conccurent_reqs,
-                ordering.clone(),
-            );
+            let tmp_resolver = Self::create_simple_async_resolver(dns_names.as_ref(), config);
 
             let dot_ips = tmp_resolver
                 .lookup(dot_provider)
@@ -303,28 +316,22 @@ impl DNSResolverHelper {
 
     fn create_simple_async_resolver(
         dns_names: &[String],
-        num_conccurent_reqs: usize,
-        ordering: DNSQueryOrdering,
+        config: DNSResolverConfig,
     ) -> DynAsyncDNSResolver {
         let mut resolver_cfg = ResolverConfig::new();
         let valid_domain_count = Self::add_dns_servers(&mut resolver_cfg, dns_names);
         if valid_domain_count > 0 {
             Box::new(AsyncResolver::tokio(
                 resolver_cfg.clone(),
-                Self::create_resolver_conf(num_conccurent_reqs, &ordering),
+                Self::create_resolver_conf(config),
             ))
         } else {
-            Self::create_system_resolver(num_conccurent_reqs, ordering)
+            Self::create_system_resolver(config)
         }
     }
 
-    fn create_system_resolver(
-        num_conccurent_reqs: usize,
-        ordering: DNSQueryOrdering,
-    ) -> DynAsyncDNSResolver {
-        if let Ok((resolver_cfg, resolver_opt)) =
-            Self::create_resolver_system_conf(num_conccurent_reqs, &ordering)
-        {
+    fn create_system_resolver(config: DNSResolverConfig) -> DynAsyncDNSResolver {
+        if let Ok((resolver_cfg, resolver_opt)) = Self::create_resolver_system_conf(config) {
             Box::new(AsyncResolver::tokio(resolver_cfg, resolver_opt))
         } else {
             info!("use simple tokio resolver");
@@ -344,40 +351,36 @@ impl DNSResolverHelper {
         valid_domain_count
     }
 
-    fn create_resolver_conf(
-        num_conccurent_reqs: usize,
-        ordering: &DNSQueryOrdering,
-    ) -> ResolverOpts {
+    fn create_resolver_conf(config: DNSResolverConfig) -> ResolverOpts {
         let mut resolver_opt = ResolverOpts::default();
         resolver_opt.timeout = Duration::from_secs(3);
-        resolver_opt.ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+        resolver_opt.ip_strategy = config.strategy.mapped_type();
         resolver_opt.attempts = 2;
-        resolver_opt.num_concurrent_reqs = num_conccurent_reqs;
-        resolver_opt.server_ordering_strategy = if ordering == &DNSQueryOrdering::UserProvidedOrder
-        {
-            ServerOrderingStrategy::UserProvidedOrder
-        } else {
-            ServerOrderingStrategy::QueryStatistics
-        };
+        resolver_opt.num_concurrent_reqs = config.num_conccurent_reqs;
+        resolver_opt.server_ordering_strategy =
+            if &config.ordering == &DNSQueryOrdering::UserProvidedOrder {
+                ServerOrderingStrategy::UserProvidedOrder
+            } else {
+                ServerOrderingStrategy::QueryStatistics
+            };
 
         resolver_opt
     }
 
     fn create_resolver_system_conf(
-        num_conccurent_reqs: usize,
-        ordering: &DNSQueryOrdering,
+        config: DNSResolverConfig,
     ) -> Result<(ResolverConfig, ResolverOpts)> {
         let (resolver_cfg, mut resolver_opt) = read_system_conf()?;
         resolver_opt.timeout = Duration::from_secs(3);
-        resolver_opt.ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+        resolver_opt.ip_strategy = config.strategy.mapped_type();
         resolver_opt.attempts = 2;
-        resolver_opt.num_concurrent_reqs = num_conccurent_reqs;
-        resolver_opt.server_ordering_strategy = if ordering == &DNSQueryOrdering::UserProvidedOrder
-        {
-            ServerOrderingStrategy::UserProvidedOrder
-        } else {
-            ServerOrderingStrategy::QueryStatistics
-        };
+        resolver_opt.num_concurrent_reqs = config.num_conccurent_reqs;
+        resolver_opt.server_ordering_strategy =
+            if &config.ordering == &DNSQueryOrdering::UserProvidedOrder {
+                ServerOrderingStrategy::UserProvidedOrder
+            } else {
+                ServerOrderingStrategy::QueryStatistics
+            };
 
         Ok((resolver_cfg, resolver_opt))
     }
@@ -389,22 +392,27 @@ mod tests {
 
     #[test]
     pub fn test_dns() {
+        let config = DNSResolverConfig {
+            strategy: DNSResolverLookupIpStrategy::Ipv6thenIpv4,
+            num_conccurent_reqs: 2,
+            ordering: DNSQueryOrdering::QueryStatistics,
+        };
+
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap()
             .block_on(async {
                 let resolver = resolver2(
-                    "dns.alidns.com",
+                    "",
+                    // "dns.alidns.com",
                     //"",
-                    //vec!["223.5.5.5".to_string()],
-                    vec![],
-                    2,
-                    DNSQueryOrdering::QueryStatistics,
+                    vec!["223.5.5.5".to_string()],
+                    config,
                 )
                 .await;
 
-                resolver.lookup("google.com").await.unwrap();
+                resolver.lookup("github.com").await.unwrap();
             });
     }
 }
