@@ -52,9 +52,9 @@ impl DNSResolverLookupIpStrategy {
 
 #[derive(Clone)]
 pub struct DNSResolverConfig {
-    strategy: DNSResolverLookupIpStrategy,
-    ordering: DNSQueryOrdering,
-    num_conccurent_reqs: usize,
+    pub strategy: DNSResolverLookupIpStrategy,
+    pub ordering: DNSQueryOrdering,
+    pub num_conccurent_reqs: usize,
 }
 
 impl ToString for DNSResolverType {
