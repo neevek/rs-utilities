@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod macros;
+pub mod cached_value;
 pub mod dns;
 use std::sync::Once;
 
