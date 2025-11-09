@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::time::{Duration, Instant};
 
 pub struct CachedValue<T, E, F>
