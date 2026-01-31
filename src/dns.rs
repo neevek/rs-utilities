@@ -1,40 +1,40 @@
-use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use log::{debug, error, info};
-use rustls::{OwnedTrustAnchor, RootCertStore};
-use trust_dns_resolver::config::{
-    LookupIpStrategy, NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig,
-    ResolverOpts, ServerOrderingStrategy,
+use hickory_resolver::config::{
+    LookupIpStrategy, NameServerConfig, NameServerConfigGroup, ResolverConfig, ResolverOpts,
+    ServerOrderingStrategy,
 };
-use trust_dns_resolver::error::{ResolveError, ResolveErrorKind};
-use trust_dns_resolver::name_server::ConnectionProvider;
-use trust_dns_resolver::system_conf::read_system_conf;
-use trust_dns_resolver::AsyncResolver;
-use webpki_roots;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::TokioResolver;
+use hickory_resolver::{ResolveError, ResolveErrorKind};
+use log::{debug, error, info, warn};
+use rustls::ClientConfig;
+use rustls_platform_verifier::BuilderVerifierExt;
+use std::net::IpAddr;
+use std::time::Duration;
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Copy, Default)]
 pub enum DNSQueryOrdering {
+    #[default]
     QueryStatistics,
     UserProvidedOrder,
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum DNSResolverType {
     DoT,
     UserProvided,
     System,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Default)]
 pub enum DNSResolverLookupIpStrategy {
     Ipv4Only,
     Ipv6Only,
     Ipv4AndIpv6,
     Ipv6thenIpv4,
+    #[default]
     Ipv4thenIpv6,
 }
 
@@ -57,13 +57,24 @@ pub struct DNSResolverConfig {
     pub num_conccurent_reqs: usize,
 }
 
-impl ToString for DNSResolverType {
-    fn to_string(&self) -> String {
-        match &self {
-            Self::DoT => "DoT".to_string(),
-            Self::UserProvided => "UserProvided".to_string(),
-            Self::System => "System".to_string(),
+impl Default for DNSResolverConfig {
+    fn default() -> Self {
+        Self {
+            strategy: DNSResolverLookupIpStrategy::default(),
+            ordering: DNSQueryOrdering::default(),
+            num_conccurent_reqs: 3,
         }
+    }
+}
+
+impl std::fmt::Display for DNSResolverType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::DoT => "DoT",
+            Self::UserProvided => "UserProvided",
+            Self::System => "System",
+        };
+        f.write_str(value)
     }
 }
 
@@ -89,7 +100,7 @@ impl DNSResolver {
     }
 
     pub fn resolver_type(&self) -> DNSResolverType {
-        self.resolver_type.clone()
+        self.resolver_type
     }
 }
 
@@ -117,50 +128,47 @@ fn ensure_port(domain: &str) -> Option<String> {
 impl AsyncDNSResolver for SimpleTokioResolver {
     async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
         let domain_with_port = ensure_port(domain);
-        let domain = if domain_with_port.is_some() {
-            domain_with_port.as_ref().unwrap().as_str()
-        } else {
-            domain
+        let domain = match domain_with_port.is_some() {
+            true => domain_with_port.as_ref().unwrap().as_str(),
+            false => domain,
         };
         let ips = tokio::net::lookup_host(domain)
             .await
-            .context(format!("failed to resolve domain: {}", domain))?
+            .context(format!("failed to resolve domain: {domain}"))?
             .map(|e| e.ip())
             .collect();
-        debug!("resolved [{}] to {:?}", domain, ips);
+        debug!("resolved [{domain}] to {ips:?}");
         Ok(ips)
     }
 
     async fn lookup_first(&self, domain: &str) -> Result<IpAddr> {
         let domain_with_port = ensure_port(domain);
-        let domain = if domain_with_port.is_some() {
-            domain_with_port.as_ref().unwrap().as_str()
-        } else {
-            domain
+        let domain = match domain_with_port.is_some() {
+            true => domain_with_port.as_ref().unwrap().as_str(),
+            false => domain,
         };
         let ip = tokio::net::lookup_host(domain)
             .await
-            .context(format!("failed to resolve domain: {}", domain))?
+            .context(format!("failed to resolve domain: {domain}"))?
             .next()
             .map(|e| e.ip())
             .context(format!(
-                "failed to obtain first resolved ip for domain: {}",
-                domain
+                "failed to obtain first resolved ip for domain: {domain}"
             ))?;
-        debug!("resolved [{}] to {:?}", domain, ip);
+        debug!("resolved [{domain}] to {ip:?}");
         Ok(ip)
     }
 }
 
 #[async_trait]
-impl<R: ConnectionProvider> AsyncDNSResolver for AsyncResolver<R> {
+impl AsyncDNSResolver for TokioResolver {
     async fn lookup(&self, domain: &str) -> Result<Vec<IpAddr>> {
         let response = self.lookup_ip(domain).await.map_err(|e| {
-            error!("failed to resolve domain: {}, error: {}", domain, e);
+            error!("failed to resolve domain: {domain}, error: {e}");
             e
         })?;
         let ips = response.iter().collect();
-        debug!("resolved [{}] to {:?}", domain, ips);
+        debug!("resolved [{domain}] to {ips:?}");
         Ok(ips)
     }
 
@@ -169,28 +177,23 @@ impl<R: ConnectionProvider> AsyncDNSResolver for AsyncResolver<R> {
         let ip = response
             .iter()
             .next()
-            .context(format!("failed to resolve domain: {}", domain));
-        debug!("resolved [{}] to {:?}", domain, ip);
+            .context(format!("failed to resolve domain: {domain}"));
+        debug!("resolved [{domain}] to {ip:?}");
         ip
     }
 }
 
-pub async fn resolver(dot_provider: &str, dns_names: Vec<String>) -> DNSResolver {
-    let default_config = DNSResolverConfig {
-        strategy: DNSResolverLookupIpStrategy::Ipv4thenIpv6,
-        num_conccurent_reqs: 3,
-        ordering: DNSQueryOrdering::QueryStatistics,
-    };
-    resolver2(dot_provider, dns_names, default_config).await
+pub async fn resolver(dot_provider: &str, name_servers: Vec<String>) -> DNSResolver {
+    resolver2(dot_provider, name_servers, DNSResolverConfig::default()).await
 }
 
 pub async fn resolver2(
     dot_provider: &str,
-    dns_names: Vec<String>,
+    name_servers: Vec<String>,
     config: DNSResolverConfig,
 ) -> DNSResolver {
     if let Ok(resolver) =
-        DNSResolverHelper::create_async_resolver(dot_provider, dns_names, config.clone()).await
+        DNSResolverHelper::create_async_resolver(dot_provider, name_servers, config.clone()).await
     {
         resolver
     } else {
@@ -210,64 +213,54 @@ struct DNSResolverHelper;
 impl DNSResolverHelper {
     async fn create_async_resolver(
         dot_provider: &str,
-        dns_names: Vec<String>,
+        name_servers: Vec<String>,
         config: DNSResolverConfig,
     ) -> Result<DNSResolver, ResolveError> {
         let mut resolver_cfg = None;
-        let dot_ips: _ = Self::resolve_dot_server(&dot_provider, &dns_names, config.clone())
-            .await
-            .map_err(|e| error!("resolving DoT server failed: {}", e))
-            .unwrap_or_default();
+        let mut resolver_tls_config = None;
+        let dot_ips: Vec<IpAddr> =
+            Self::resolve_dot_server(dot_provider, &name_servers, config.clone())
+                .await
+                .map_err(|e| error!("resolving DoT server failed: {e}"))
+                .unwrap_or_default();
 
         let mut using_dot = false;
         if !dot_ips.is_empty() {
-            let ns_group_cfg =
-                NameServerConfigGroup::from_ips_tls(&dot_ips, 853, dot_provider.to_string(), true);
+            if let Some(tls_config) = Self::build_tls_config() {
+                let ns_group_cfg = NameServerConfigGroup::from_ips_tls(
+                    &dot_ips,
+                    853,
+                    dot_provider.to_string(),
+                    true,
+                );
+                let dot_resolver_cfg = ResolverConfig::from_parts(None, vec![], ns_group_cfg);
+                resolver_cfg = Some(dot_resolver_cfg);
+                resolver_tls_config = Some(tls_config);
+                using_dot = true;
 
-            let mut root_store = RootCertStore::empty();
-            root_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-                OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            }));
-
-            let client_config = rustls::ClientConfig::builder()
-                .with_safe_default_cipher_suites()
-                .with_safe_default_kx_groups()
-                .with_protocol_versions(&[&rustls::version::TLS12])
-                .unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-
-            let mut dot_resolver_cfg = ResolverConfig::from_parts(None, vec![], ns_group_cfg);
-            dot_resolver_cfg.set_tls_client_config(Arc::new(client_config));
-            resolver_cfg = Some(dot_resolver_cfg);
-            using_dot = true;
-
-            info!("will use DoT server: {:?} -> {:?}", dot_provider, dot_ips);
+                info!("will use DoT server: {dot_provider:?} -> {dot_ips:?}");
+            } else {
+                warn!("failed to build TLS config; DoT disabled");
+            }
         }
 
         // only when failing to use DoT server will normal name servers be used
         if resolver_cfg.is_none() {
             let mut normal_resolver_cfg = ResolverConfig::default();
-            let count = Self::add_dns_servers(&mut normal_resolver_cfg, &dns_names);
+            let count = Self::add_dns_servers(&mut normal_resolver_cfg, &name_servers);
             if count > 0 {
                 resolver_cfg = Some(normal_resolver_cfg);
-                info!(
-                    "will use {} configured name servers: {:?}",
-                    count, dns_names
-                );
+                info!("will use {count} configured name servers: {name_servers:?}");
             }
         }
 
         let async_dns_resolver: DynAsyncDNSResolver;
         let resolver_type;
-        if resolver_cfg.is_some() {
-            async_dns_resolver = Box::new(AsyncResolver::tokio(
-                resolver_cfg.unwrap(),
-                Self::create_resolver_conf(config),
+        if let Some(resolver_cfg) = resolver_cfg {
+            async_dns_resolver = Box::new(Self::build_resolver_with_config(
+                resolver_cfg,
+                config,
+                resolver_tls_config,
             ));
             resolver_type = if using_dot {
                 DNSResolverType::DoT
@@ -275,7 +268,7 @@ impl DNSResolverHelper {
                 DNSResolverType::UserProvided
             };
         } else {
-            async_dns_resolver = Self::create_simple_async_resolver(&vec![], config);
+            async_dns_resolver = Self::create_simple_async_resolver(&[], config);
             resolver_type = DNSResolverType::System;
         }
 
@@ -284,23 +277,20 @@ impl DNSResolverHelper {
 
     async fn resolve_dot_server(
         dot_provider: &str,
-        dns_names: &[String],
+        name_servers: &[String],
         config: DNSResolverConfig,
     ) -> Result<Vec<IpAddr>, ResolveError> {
         if !dot_provider.is_empty() {
-            info!("resovling DoT server: {}", dot_provider);
+            info!("resolving DoT server: {dot_provider}");
             // if DoT (DNS over TLS) is specified, a simple resolver is created to resolve the DoT domain first
-            let tmp_resolver = Self::create_simple_async_resolver(dns_names.as_ref(), config);
+            let tmp_resolver = Self::create_simple_async_resolver(name_servers, config);
 
             let dot_ips = tmp_resolver
                 .lookup(dot_provider)
                 .await
                 .map_err(|e| {
-                    let msg = format!(
-                        "failed to resolve DoT domain: {}, error: {}",
-                        dot_provider, e
-                    );
-                    error!("{}", msg);
+                    let msg = format!("failed to resolve DoT domain: {dot_provider}, error: {e}");
+                    error!("{msg}");
                     ResolveErrorKind::Msg(msg)
                 })
                 .into_iter()
@@ -315,74 +305,79 @@ impl DNSResolverHelper {
     }
 
     fn create_simple_async_resolver(
-        dns_names: &[String],
+        name_servers: &[String],
         config: DNSResolverConfig,
     ) -> DynAsyncDNSResolver {
         let mut resolver_cfg = ResolverConfig::new();
-        let valid_domain_count = Self::add_dns_servers(&mut resolver_cfg, dns_names);
+        let valid_domain_count = Self::add_dns_servers(&mut resolver_cfg, name_servers);
         if valid_domain_count > 0 {
-            Box::new(AsyncResolver::tokio(
-                resolver_cfg.clone(),
-                Self::create_resolver_conf(config),
-            ))
+            Box::new(Self::build_resolver_with_config(resolver_cfg, config, None))
         } else {
             Self::create_system_resolver(config)
         }
     }
 
     fn create_system_resolver(config: DNSResolverConfig) -> DynAsyncDNSResolver {
-        if let Ok((resolver_cfg, resolver_opt)) = Self::create_resolver_system_conf(config) {
-            Box::new(AsyncResolver::tokio(resolver_cfg, resolver_opt))
-        } else {
-            info!("use simple tokio resolver");
-            Box::new(SimpleTokioResolver)
+        match TokioResolver::builder_tokio() {
+            Ok(mut builder) => {
+                Self::apply_resolver_opts(builder.options_mut(), &config);
+                Box::new(builder.build())
+            }
+            Err(_) => {
+                info!("use simple tokio resolver");
+                Box::new(SimpleTokioResolver)
+            }
         }
     }
 
-    fn add_dns_servers(resolver_cfg: &mut ResolverConfig, dns_names: &[String]) -> usize {
+    fn add_dns_servers(resolver_cfg: &mut ResolverConfig, name_servers: &[String]) -> usize {
         let mut valid_domain_count = 0;
-        for domain in dns_names.iter() {
+        for domain in name_servers.iter() {
             if let Ok(ip) = format!("{}:53", domain).parse() {
                 resolver_cfg.add_name_server(NameServerConfig::new(ip, Protocol::Udp));
+                resolver_cfg.add_name_server(NameServerConfig::new(ip, Protocol::Tcp));
                 valid_domain_count += 1;
-                info!("added dns server: {}", ip);
+                info!("added dns server: {ip}");
             }
         }
         valid_domain_count
     }
 
-    fn create_resolver_conf(config: DNSResolverConfig) -> ResolverOpts {
-        let mut resolver_opt = ResolverOpts::default();
-        resolver_opt.timeout = Duration::from_secs(3);
-        resolver_opt.ip_strategy = config.strategy.mapped_type();
-        resolver_opt.attempts = 2;
-        resolver_opt.num_concurrent_reqs = config.num_conccurent_reqs;
-        resolver_opt.server_ordering_strategy =
-            if &config.ordering == &DNSQueryOrdering::UserProvidedOrder {
-                ServerOrderingStrategy::UserProvidedOrder
-            } else {
-                ServerOrderingStrategy::QueryStatistics
-            };
-
-        resolver_opt
+    fn build_resolver_with_config(
+        resolver_cfg: ResolverConfig,
+        config: DNSResolverConfig,
+        tls_config: Option<ClientConfig>,
+    ) -> TokioResolver {
+        let mut builder =
+            TokioResolver::builder_with_config(resolver_cfg, TokioConnectionProvider::default());
+        Self::apply_resolver_opts(builder.options_mut(), &config);
+        if let Some(tls_config) = tls_config {
+            builder.options_mut().tls_config = tls_config;
+        }
+        builder.build()
     }
 
-    fn create_resolver_system_conf(
-        config: DNSResolverConfig,
-    ) -> Result<(ResolverConfig, ResolverOpts)> {
-        let (resolver_cfg, mut resolver_opt) = read_system_conf()?;
-        resolver_opt.timeout = Duration::from_secs(3);
-        resolver_opt.ip_strategy = config.strategy.mapped_type();
-        resolver_opt.attempts = 2;
-        resolver_opt.num_concurrent_reqs = config.num_conccurent_reqs;
-        resolver_opt.server_ordering_strategy =
-            if &config.ordering == &DNSQueryOrdering::UserProvidedOrder {
-                ServerOrderingStrategy::UserProvidedOrder
-            } else {
-                ServerOrderingStrategy::QueryStatistics
-            };
+    fn apply_resolver_opts(opts: &mut ResolverOpts, config: &DNSResolverConfig) {
+        opts.timeout = Duration::from_secs(3);
+        opts.ip_strategy = config.strategy.mapped_type();
+        opts.attempts = 2;
+        opts.num_concurrent_reqs = config.num_conccurent_reqs;
+        opts.server_ordering_strategy = if config.ordering == DNSQueryOrdering::UserProvidedOrder {
+            ServerOrderingStrategy::UserProvidedOrder
+        } else {
+            ServerOrderingStrategy::QueryStatistics
+        };
+    }
 
-        Ok((resolver_cfg, resolver_opt))
+    fn build_tls_config() -> Option<ClientConfig> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        ClientConfig::builder()
+            .with_platform_verifier()
+            .map(|builder| builder.with_no_client_auth())
+            .map_err(|err| {
+                error!("failed to build platform TLS verifier: {err}");
+            })
+            .ok()
     }
 }
 
@@ -403,14 +398,8 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let resolver = resolver2(
-                    "",
-                    // "dns.alidns.com",
-                    //"",
-                    vec!["223.5.5.5".to_string()],
-                    config,
-                )
-                .await;
+                let resolver =
+                    resolver2("dns.alidns.com", vec!["223.5.5.5".to_string()], config).await;
 
                 resolver.lookup("github.com").await.unwrap();
             });
