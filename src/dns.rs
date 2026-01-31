@@ -385,6 +385,122 @@ impl DNSResolverHelper {
 mod tests {
     use super::*;
 
+    struct TestResolver {
+        ips: Vec<IpAddr>,
+    }
+
+    #[async_trait]
+    impl AsyncDNSResolver for TestResolver {
+        async fn lookup(&self, _domain: &str) -> Result<Vec<IpAddr>> {
+            Ok(self.ips.clone())
+        }
+
+        async fn lookup_first(&self, _domain: &str) -> Result<IpAddr> {
+            self.ips
+                .first()
+                .copied()
+                .context("no ip available for lookup_first")
+        }
+    }
+
+    #[test]
+    fn test_lookup_ip_strategy_mapped_type() {
+        assert_eq!(
+            DNSResolverLookupIpStrategy::Ipv4Only.mapped_type(),
+            LookupIpStrategy::Ipv4Only
+        );
+        assert_eq!(
+            DNSResolverLookupIpStrategy::Ipv6Only.mapped_type(),
+            LookupIpStrategy::Ipv6Only
+        );
+        assert_eq!(
+            DNSResolverLookupIpStrategy::Ipv4AndIpv6.mapped_type(),
+            LookupIpStrategy::Ipv4AndIpv6
+        );
+        assert_eq!(
+            DNSResolverLookupIpStrategy::Ipv6thenIpv4.mapped_type(),
+            LookupIpStrategy::Ipv6thenIpv4
+        );
+        assert_eq!(
+            DNSResolverLookupIpStrategy::Ipv4thenIpv6.mapped_type(),
+            LookupIpStrategy::Ipv4thenIpv6
+        );
+    }
+
+    #[test]
+    fn test_ensure_port() {
+        assert_eq!(ensure_port("example.com").as_deref(), Some("example.com:80"));
+        assert_eq!(ensure_port("example.com:443"), None);
+    }
+
+    #[test]
+    fn test_add_dns_servers() {
+        let mut resolver_cfg = ResolverConfig::new();
+        let count = DNSResolverHelper::add_dns_servers(
+            &mut resolver_cfg,
+            &["1.1.1.1".to_string(), "bad-ip".to_string()],
+        );
+        assert_eq!(count, 1);
+        assert_eq!(resolver_cfg.name_servers().len(), 2);
+    }
+
+    #[test]
+    fn test_apply_resolver_opts() {
+        let config = DNSResolverConfig {
+            strategy: DNSResolverLookupIpStrategy::Ipv6Only,
+            ordering: DNSQueryOrdering::UserProvidedOrder,
+            num_conccurent_reqs: 4,
+        };
+        let mut opts = ResolverOpts::default();
+        DNSResolverHelper::apply_resolver_opts(&mut opts, &config);
+        assert_eq!(opts.ip_strategy, LookupIpStrategy::Ipv6Only);
+        assert_eq!(opts.attempts, 2);
+        assert_eq!(opts.num_concurrent_reqs, 4);
+        assert_eq!(
+            opts.server_ordering_strategy,
+            ServerOrderingStrategy::UserProvidedOrder
+        );
+    }
+
+    #[test]
+    fn test_resolver_type_display() {
+        assert_eq!(DNSResolverType::DoT.to_string(), "DoT");
+        assert_eq!(DNSResolverType::UserProvided.to_string(), "UserProvided");
+        assert_eq!(DNSResolverType::System.to_string(), "System");
+    }
+
+    #[test]
+    fn test_dns_resolver_lookup_helpers() {
+        let ips = vec![
+            "1.1.1.1".parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+        ];
+        let resolver = DNSResolver::new(Box::new(TestResolver { ips: ips.clone() }), DNSResolverType::System);
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                assert!(matches!(resolver.resolver_type(), DNSResolverType::System));
+                assert_eq!(resolver.lookup("example.com").await.unwrap(), ips);
+                assert_eq!(resolver.lookup_first("example.com").await.unwrap(), ips[0]);
+            });
+    }
+
+    #[test]
+    fn test_resolver2_empty_dot_uses_system_type() {
+        let config = DNSResolverConfig::default();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let resolver = resolver2("", vec![], config).await;
+                assert!(matches!(resolver.resolver_type(), DNSResolverType::System));
+            });
+    }
+
     #[test]
     pub fn test_dns() {
         let config = DNSResolverConfig {
