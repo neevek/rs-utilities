@@ -2,6 +2,7 @@
 pub mod macros;
 pub mod cached_value;
 pub mod dns;
+pub mod net;
 use std::sync::Once;
 
 #[cfg(not(target_os = "android"))]
